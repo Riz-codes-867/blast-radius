@@ -18,6 +18,9 @@ tests the patch can break, split across workers to minimise the simulated CI tim
      code naming the class, and the class's own methods.
    - *Function code that only runs at start-up* (decorators, table builders, metaclasses): the file's or dialect
      family's tests plus tests that run the function's callers.
+   - *Names read directly by test code*: some tests inspect module data themselves (e.g. `test_typing` compares
+     `EXPRESSION_METADATA` tables), which coverage of sqlglot cannot see; edits to a definition also select the tests
+     whose own code reads that name.
    - *Lambdas* inside class-level tables run when called, so they map like function code.
    - *Fixture files*: tests that opened that file during the test run (recorded with an audit hook); unknown
      fixtures fall back to tests that read its directory.

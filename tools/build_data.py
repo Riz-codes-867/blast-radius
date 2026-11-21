@@ -109,7 +109,40 @@ for _ in range(5):                                     # expand `from x import *
             f = modfile(m)
             if f: defs[rel] |= defs[f] - {'*'}
 defs = {k: sorted(v) for k, v in defs.items()}
-data = {'root_refs': root_refs, 'defs': defs, 'usage': usage, 'import_only': import_only, 'importers': {k: sorted(v) for k, v in importers.items()}, 'ids': ids, 'sets': sets, 'lines': lines, 'file_tests': file_tests, 'uses': uses,
+# name -> tests whose own code reads it (test code reads module/class data directly, which coverage cannot see)
+defined = set()
+for p in sorted(glob.glob(os.path.join(src, 'sqlglot', '**', '*.py'), recursive=True)):
+    for n in ast.walk(ast.parse(open(p).read())):
+        if isinstance(n, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)): defined.add(n.name)
+        elif isinstance(n, (ast.Assign, ast.AnnAssign)):
+            for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                for x in ast.walk(t):
+                    if isinstance(x, ast.Name): defined.add(x.id)
+                    if isinstance(x, ast.Attribute): defined.add(x.attr)
+def read_names(node):
+    out = set()
+    for x in ast.walk(node):
+        if isinstance(x, ast.Name): out.add(x.id)
+        elif isinstance(x, ast.Attribute): out.add(x.attr)
+        elif isinstance(x, ast.Constant) and isinstance(x.value, str) and x.value.isidentifier(): out.add(x.value)
+    return out
+tnames = collections.defaultdict(set)
+for rel, txt in tests_src.items():
+    tree = ast.parse(txt)
+    helpers = {f.name: read_names(f) for f in tree.body if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    for cls in [c for c in tree.body if isinstance(c, ast.ClassDef)]:
+        methods = {m.name: m for m in cls.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        shared = set()
+        for nm in ('setUp', 'setUpClass'):
+            if nm in methods: shared |= read_names(methods[nm])
+        for nm, m in methods.items():
+            tid = f"{rel}::{cls.name}::{nm}"
+            if tid not in num_of_id: continue
+            names = read_names(m) | shared
+            for h in list(names & set(helpers)): names |= helpers[h]      # one level of module helpers
+            for x in (names & defined) - {'self', 'cls'}: tnames[x].add(num_of_id[tid])
+test_names = {k: sid(v) for k, v in tnames.items()}
+data = {'test_names': test_names, 'root_refs': root_refs, 'defs': defs, 'usage': usage, 'import_only': import_only, 'importers': {k: sorted(v) for k, v in importers.items()}, 'ids': ids, 'sets': sets, 'lines': lines, 'file_tests': file_tests, 'uses': uses,
         'fixtures': {f: sid(s) for f, s in fix.items()}, 'fixture_dirs': {d: sid(s) for d, s in fixdir.items()}}
 with gzip.open(out, 'wt', compresslevel=9) as f: json.dump(data, f, separators=(',', ':'))
 print('sets', len(sets), 'names', len(uses), 'bytes', os.path.getsize(out))

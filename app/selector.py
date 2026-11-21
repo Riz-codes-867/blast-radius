@@ -35,6 +35,7 @@ class Selector:
         self.lines, self.file_sets, self.uses = d['lines'], d['file_tests'], d['uses']
         self.fixtures, self.fixture_dirs, self.importers = d['fixtures'], d['fixture_dirs'], d['importers']
         self.usage = d.get('usage', {})
+        self.test_names = d.get('test_names', {})
         self.root_refs, self.defs = d.get('root_refs', {}), {k: set(v) for k, v in d.get('defs', {}).items()}
         self.import_sensitive = {t['number'] for t in tests if t['file'] in ('tests/test_dialect_imports.py', 'tests/test_dialect_entry_points.py') or t['id'].endswith('::test_lazy_load')}
         self.import_only = {f: set(v) for f, v in d.get('import_only', {}).items()}
@@ -152,6 +153,9 @@ class Selector:
                 inv = self.involvement(path, L) if users else None
                 if inv is not None and users & inv: users &= inv
                 got |= users
+                for nm in names:                       # tests whose own code reads the name
+                    t = self.test_names.get(nm)
+                    if t is not None: got |= self.sets[t]
                 if not got:
                     got = (self.involvement(path, L) or set()) | set(self.file_tests(path)) | self.family(path)
                     if not got: got = self.all_tests()
