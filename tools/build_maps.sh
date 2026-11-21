@@ -11,7 +11,7 @@ python3 -m venv venv && . venv/bin/activate && pip install -q -r "$KIT/requireme
 cd sqlglot && export SKIP_INTEGRATION=0 PYTHONPATH=$PWD:$HERE
 rm -rf .coverage-map && mkdir .coverage-map
 # 1) which tests execute which lines (worker-process code run in-process, through pickle)
-coverage run --rcfile="$HERE/coveragerc" -m pytest -q -p no:cacheprovider -p syncpool_plugin tests || true
+coverage run --rcfile="$HERE/coveragerc" -m pytest -q -p no:cacheprovider -p prewarm_plugin -p syncpool_plugin tests || true
 coverage combine --rcfile="$HERE/coveragerc" -q
 python3 "$HERE/buildmap.py" .coverage-map/.coverage "$KIT/sample/tests.json" ../linemap.json
 # 2) which non-Python files (fixtures) each test opens

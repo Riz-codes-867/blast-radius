@@ -20,6 +20,15 @@ def sid(nums):
     return set_id[key]
 
 lines = {f: {l: sid(s) for l, s in d.items()} for f, d in M.items()}
+# lines inside functions that only ever ran while modules were being imported (no test was running)
+IMP = json.load(open(linemap_json))['import']
+import_only = {}
+for f, ls in IMP.items():
+    p = os.path.join(src, f)
+    if not os.path.exists(p): continue
+    fi = core.FileIndex(open(p).read())
+    keep = sorted(l for l in ls if fi.in_func.get(l) and str(l) not in M.get(f, {}))
+    if keep: import_only[f] = keep
 file_tests = {f: sid(set().union(*map(set, d.values()))) for f, d in M.items()}
 
 # name -> sets of tests that run a statement reading that name (across sqlglot)
@@ -53,7 +62,7 @@ for p in sorted(glob.glob(os.path.join(src, 'tests', '**', '*.py'), recursive=Tr
         for m in mods:
             if m and m.startswith('tests'):
                 importers[m.replace('.', '/') + '.py'].add(rel)
-data = {'importers': {k: sorted(v) for k, v in importers.items()}, 'ids': ids, 'sets': sets, 'lines': lines, 'file_tests': file_tests, 'uses': uses,
+data = {'import_only': import_only, 'importers': {k: sorted(v) for k, v in importers.items()}, 'ids': ids, 'sets': sets, 'lines': lines, 'file_tests': file_tests, 'uses': uses,
         'fixtures': {f: sid(s) for f, s in fix.items()}, 'fixture_dirs': {d: sid(s) for d, s in fixdir.items()}}
 with gzip.open(out, 'wt', compresslevel=9) as f: json.dump(data, f, separators=(',', ':'))
 print('sets', len(sets), 'names', len(uses), 'bytes', os.path.getsize(out))

@@ -14,6 +14,8 @@ tests the patch can break, split across workers to minimise the simulated CI tim
    - *Import-time lines* (class or module constants such as `WEEK_OFFSET = -1`): coverage cannot say which test
      depends on them, so we follow the names they define to every statement that reads them, then narrow to tests
      that exercise the enclosing class (same-dialect files, code naming the class, the class's own methods).
+   - *Function code that only runs at start-up* (decorators, table builders, metaclasses): the file's or dialect
+     family's tests plus tests that run the function's callers.
    - *Lambdas* inside class-level tables run when called, so they map like function code.
    - *Fixture files*: tests that opened that file during the test run (recorded with an audit hook); unknown
      fixtures fall back to tests that read its directory.
@@ -28,7 +30,10 @@ tests the patch can break, split across workers to minimise the simulated CI tim
 `tools/build_maps.sh <kit>` clones sqlglot at the pinned commit, runs its test suite under coverage.py with one
 coverage context per test, and records fixture-file opens. The suite sends work to spawned worker processes,
 which per-test coverage cannot see, so `tools/syncpool_plugin.py` runs that work in-process **through pickle**
-(as a real process boundary would). Nothing is derived from patches or answers; no patch→test table exists.
+(as a real process boundary would). `tools/prewarm_plugin.py` imports every module and exercises every
+dialect once before the first test, so one-time work (lazy dialect imports, metaclass table building, per-class
+caches) is recorded as start-up work instead of being credited to whichever test triggered it first; edits to
+such start-up code select the file's (or dialect family's) tests plus the callers' tests. Nothing is derived from patches or answers; no patch→test table exists.
 
 ## Acknowledgments
 

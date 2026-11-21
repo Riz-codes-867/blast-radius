@@ -34,6 +34,7 @@ class Selector:
         self.sets = [frozenset(remap[n] for n in s if remap[n] is not None) for s in d['sets']]
         self.lines, self.file_sets, self.uses = d['lines'], d['file_tests'], d['uses']
         self.fixtures, self.fixture_dirs, self.importers = d['fixtures'], d['fixture_dirs'], d['importers']
+        self.import_only = {f: set(v) for f, v in d.get('import_only', {}).items()}
         self.stems = {}
         for f in self.lines: self.stems.setdefault(os.path.basename(f), []).append(f)
         self._idx = {}
@@ -53,6 +54,13 @@ class Selector:
         return self._idx[path]
     def all_tests(self): return set(self.ms)
 
+    def family(self, path):
+        """Tests of the dialect a file belongs to: same-named files' test-time coverage plus tests/dialects/test_<name>.py."""
+        stem = os.path.basename(path)[:-3]; out = set()
+        for f in self.stems.get(os.path.basename(path), ()): out |= self.file_tests(f)
+        out |= self.by_file.get(f'tests/dialects/test_{stem}.py', set())
+        return out
+
     def involvement(self, path, line):
         """Tests that exercise the class(es) around a class-level line."""
         fi = self.index(path)
@@ -60,7 +68,7 @@ class Selector:
         if not chain: return None
         inv = set()
         if any(k in path for k in ('/dialects/', '/parsers/', '/generators/', '/typing/', '/tokenizers/')):
-            for f in self.stems.get(os.path.basename(path), ()): inv |= self.file_tests(f)
+            inv |= self.family(path)
         for c in chain:
             inv |= self.users(c.name)
             for l in range(c.lineno, c.end_lineno + 1):
@@ -83,6 +91,13 @@ class Selector:
             a, b = fi.span_of[L]
             got = set()
             for l in range(a, b + 1): got |= self.at(path, l)
+            if fi.in_func.get(L) and not got and any(l in self.import_only.get(path, ()) for l in range(a, b + 1)):
+                # function code that only runs while modules load (decorators, table builders):
+                # whatever it builds is used later, so take the file's tests and the callers' tests
+                got = set(self.file_tests(path)) or set(self.family(path))
+                for fn in [n for n in ast.walk(fi.tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.lineno <= L <= n.end_lineno]:
+                    got |= self.users(fn.name)
+                log(path, L, 'import-time function code ->', len(got))
             if not fi.in_func.get(L):   # runs at import: follow the names it defines to their readers
                 names, users = fi.defined_names(L), set()
                 for nm in names: users |= self.users(nm, exclude=(path, fi.stmt_of[L]))
@@ -90,7 +105,9 @@ class Selector:
                 if inv is not None and users & inv: users &= inv
                 got |= users
                 if not got:
-                    got = set(self.file_tests(path)); log(path, L, 'import-time line, no readers -> whole-file tests')
+                    got = (self.involvement(path, L) or set()) | set(self.file_tests(path)) | self.family(path)
+                    if not got: got = self.all_tests()
+                    log(path, L, 'import-time line, no readers ->', len(got))
             S |= got
         return S
 
