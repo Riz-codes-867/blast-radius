@@ -34,6 +34,7 @@ class Selector:
         self.sets = [frozenset(remap[n] for n in s if remap[n] is not None) for s in d['sets']]
         self.lines, self.file_sets, self.uses = d['lines'], d['file_tests'], d['uses']
         self.fixtures, self.fixture_dirs, self.importers = d['fixtures'], d['fixture_dirs'], d['importers']
+        self.usage = d.get('usage', {})
         self.import_only = {f: set(v) for f, v in d.get('import_only', {}).items()}
         self.stems = {}
         for f in self.lines: self.stems.setdefault(os.path.basename(f), []).append(f)
@@ -69,6 +70,12 @@ class Selector:
         inv = set()
         if any(k in path for k in ('/dialects/', '/parsers/', '/generators/', '/typing/', '/tokenizers/')):
             inv |= self.family(path)
+        module = path[:-3].replace('/', '.')
+        qual = '.'.join(c.name for c in sorted(chain, key=lambda c: c.lineno))
+        for i in range(1, len(chain) + 1):   # tests that used this class (or a subclass) at run time
+            q = '.'.join(c.name for c in sorted(chain, key=lambda c: c.lineno)[:i])
+            u = self.usage.get(f'{module}:{q}')
+            if u is not None: inv |= self.sets[u]
         for c in chain:
             inv |= self.users(c.name)
             for l in range(c.lineno, c.end_lineno + 1):

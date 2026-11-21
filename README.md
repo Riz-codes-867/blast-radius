@@ -13,7 +13,9 @@ tests the patch can break, split across workers to minimise the simulated CI tim
    - *Comment/whitespace-only edits*: if the token stream minus comments is unchanged, the program is unchanged → no tests.
    - *Import-time lines* (class or module constants such as `WEEK_OFFSET = -1`): coverage cannot say which test
      depends on them, so we follow the names they define to every statement that reads them, then narrow to tests
-     that exercise the enclosing class (same-dialect files, code naming the class, the class's own methods).
+     that exercise the enclosing class: tests that used an object of that class or a subclass at run time
+     (recorded by `tools/usage_plugin.py`, so a Postgres setting also reaches Redshift tests), same-dialect files,
+     code naming the class, and the class's own methods.
    - *Function code that only runs at start-up* (decorators, table builders, metaclasses): the file's or dialect
      family's tests plus tests that run the function's callers.
    - *Lambdas* inside class-level tables run when called, so they map like function code.
@@ -41,3 +43,10 @@ such start-up code select the file's (or dialect family's) tests plus the caller
 - [coverage.py](https://github.com/nedbat/coveragepy) and [pytest](https://pytest.org) — used offline to build the map.
 - Starter kit, scorer and scheduling idea (longest-processing-time first) from the Blast Radius starter by RWX / Builders.
 - Developed with help from Claude (Anthropic) as an AI pair-programmer; AI use is allowed by the track rules.
+
+## How it was validated
+
+- The 30 released samples (labels used only for scoring and error analysis).
+- Our own mutations of the pinned source (and/or swaps, flipped constants, off-by-one numbers), each labeled by
+  running the full test suite the way the organizers did. They exposed two blind spots that the samples did not:
+  class-level settings read without running any dialect-specific code, and one-time start-up code.

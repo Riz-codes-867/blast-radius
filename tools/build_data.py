@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'app'))
 import core
 
 linemap_json, openmap_json, tests_json, src, out = sys.argv[1:6]
+usage_json = sys.argv[6] if len(sys.argv) > 6 else None
 M = json.load(open(linemap_json))['lines']
 T = json.load(open(tests_json))['tests']
 ids = [t['id'] for t in T]; num_of_id = {t['id']: t['number'] for t in T}
@@ -62,7 +63,15 @@ for p in sorted(glob.glob(os.path.join(src, 'tests', '**', '*.py'), recursive=Tr
         for m in mods:
             if m and m.startswith('tests'):
                 importers[m.replace('.', '/') + '.py'].add(rel)
-data = {'import_only': import_only, 'importers': {k: sorted(v) for k, v in importers.items()}, 'ids': ids, 'sets': sets, 'lines': lines, 'file_tests': file_tests, 'uses': uses,
+# class (module:qualname, whole MRO) -> tests that used an object of that class
+usage = {}
+if usage_json:
+    acc = collections.defaultdict(set)
+    for nid, classes in json.load(open(usage_json)).items():
+        if nid in num_of_id:
+            for c in classes: acc[c].add(num_of_id[nid])
+    usage = {c: sid(v) for c, v in acc.items()}
+data = {'usage': usage, 'import_only': import_only, 'importers': {k: sorted(v) for k, v in importers.items()}, 'ids': ids, 'sets': sets, 'lines': lines, 'file_tests': file_tests, 'uses': uses,
         'fixtures': {f: sid(s) for f, s in fix.items()}, 'fixture_dirs': {d: sid(s) for d, s in fixdir.items()}}
 with gzip.open(out, 'wt', compresslevel=9) as f: json.dump(data, f, separators=(',', ':'))
 print('sets', len(sets), 'names', len(uses), 'bytes', os.path.getsize(out))
