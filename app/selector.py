@@ -35,6 +35,8 @@ class Selector:
         self.lines, self.file_sets, self.uses = d['lines'], d['file_tests'], d['uses']
         self.fixtures, self.fixture_dirs, self.importers = d['fixtures'], d['fixture_dirs'], d['importers']
         self.usage = d.get('usage', {})
+        self.root_refs, self.defs = d.get('root_refs', {}), {k: set(v) for k, v in d.get('defs', {}).items()}
+        self.import_sensitive = {t['number'] for t in tests if t['file'] in ('tests/test_dialect_imports.py', 'tests/test_dialect_entry_points.py') or t['id'].endswith('::test_lazy_load')}
         self.import_only = {f: set(v) for f, v in d.get('import_only', {}).items()}
         self.stems = {}
         for f in self.lines: self.stems.setdefault(os.path.basename(f), []).append(f)
@@ -82,18 +84,57 @@ class Selector:
                 if fi.in_func.get(l): inv |= self.at(path, l)
         return inv
 
+    def module_file(self, mod):
+        p = mod.replace('.', '/')
+        for c in (p + '.py', p + '/__init__.py'):
+            if (SRC / c).exists(): return c
+        return None
+
+    def imports_resolve(self, path, tree):
+        """Every sqlglot import in the patched file names a module/attribute that exists in the pinned source."""
+        pkg = path[:-3].replace('/', '.')
+        if path.endswith('__init__.py'): pkg = pkg[: -len('.__init__')]
+        else: pkg = pkg.rsplit('.', 1)[0]
+        guarded = [(t.lineno, t.end_lineno) for t in ast.walk(tree) if isinstance(t, ast.Try)]
+        ours = lambda m: m == 'sqlglot' or m.startswith('sqlglot.')
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.Import, ast.ImportFrom)) and any(a <= n.lineno <= b for a, b in guarded):
+                continue   # optional imports inside try/except
+            if isinstance(n, ast.ImportFrom):
+                mod = n.module or ''
+                if n.level:
+                    base = pkg.split('.')
+                    base = base[: len(base) - (n.level - 1)] if n.level > 1 else base
+                    mod = '.'.join(base + ([mod] if mod else []))
+                if not ours(mod): continue
+                f = self.module_file(mod)
+                if f is None: return False
+                for a in n.names:
+                    if a.name != '*' and '*' not in self.defs.get(f, ()) and a.name not in self.defs.get(f, ()) and self.module_file(mod + '.' + a.name) is None:
+                        return False
+            elif isinstance(n, ast.Import):
+                for a in n.names:
+                    if ours(a.name) and self.module_file(a.name) is None: return False
+        return True
+
     # ---- decision 1
     def python_source(self, path, hunks):
         old = (SRC / path).read_text()
         new = core.apply_hunks(old, hunks)
         try:
-            ast.parse(new)
+            new_tree = ast.parse(new)
         except SyntaxError:
             log(path, 'syntax error after patch -> all tests'); return self.all_tests()
         if core.code_tokens(old) == core.code_tokens(new):
             log(path, 'comments/whitespace only -> nothing'); return set()
+        if not self.imports_resolve(path, new_tree):
+            log(path, 'an import no longer resolves -> all tests'); return self.all_tests()
         fi, S = self.index(path), set()
-        for L in sorted(core.touched_old_lines(hunks)):
+        touched = sorted(core.touched_old_lines(hunks))
+        if any(isinstance(n, (ast.Import, ast.ImportFrom)) and not fi.in_func.get(n.lineno)
+               and any(n.lineno <= L <= n.end_lineno for L in touched) for n in ast.walk(fi.tree)):
+            S |= self.import_sensitive    # import-order / lazy-loading tests
+        for L in touched:
             if L not in fi.span_of: continue
             a, b = fi.span_of[L]
             got = set()
@@ -138,7 +179,8 @@ class Selector:
                 S |= self.sets[got] if got is not None else self.all_tests()
             elif path.startswith('sqlglot/'):
                 S |= self.file_tests(path) or self.all_tests()
-            # files outside sqlglot/ and tests/ are not read by the test suite
+            else:   # outside sqlglot/ and tests/: only test files that name this path read it
+                for f in self.root_refs.get(path.split('/')[0], ()): S |= self.by_file.get(f, set())
         return S
 
     # ---- decision 2

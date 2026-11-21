@@ -22,6 +22,9 @@ tests the patch can break, split across workers to minimise the simulated CI tim
    - *Fixture files*: tests that opened that file during the test run (recorded with an audit hook); unknown
      fixtures fall back to tests that read its directory.
    - *Test files*: all tests in that file and in files importing it.
+   - *Edited imports*: if a sqlglot import in the patched file no longer resolves against the pinned source,
+     every test runs (an ImportError fails whole test files); valid import edits add the import-order tests.
+   - *Files outside `sqlglot/` and `tests/`* (e.g. `sqlglotc/setup.py`): the test files that name them.
    - *Syntax errors after the patch, unknown helpers, or any internal error* → run every test (never misses).
 2. **How to split.** Longest test first onto the least-loaded worker, for 1–8 workers; keep the cheapest under
    the official cost (busiest worker + 2 s per worker).

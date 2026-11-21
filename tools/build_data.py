@@ -3,7 +3,7 @@
 Everything here is derived from the pinned commit only (coverage, imports, fixtures);
 nothing is derived from any patch or answer.
 """
-import ast, collections, glob, gzip, json, os, sys
+import ast, collections, glob, gzip, json, os, re, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'app'))
 import core
 
@@ -71,7 +71,45 @@ if usage_json:
         if nid in num_of_id:
             for c in classes: acc[c].add(num_of_id[nid])
     usage = {c: sid(v) for c, v in acc.items()}
-data = {'usage': usage, 'import_only': import_only, 'importers': {k: sorted(v) for k, v in importers.items()}, 'ids': ids, 'sets': sets, 'lines': lines, 'file_tests': file_tests, 'uses': uses,
+# files outside sqlglot/ and tests/ (e.g. sqlglotc/setup.py) -> test files whose source names them
+root_refs = {}
+tests_src = {os.path.relpath(p, src): open(p).read() for p in glob.glob(os.path.join(src, 'tests', '**', '*.py'), recursive=True)}
+for entry in sorted(os.listdir(src)):
+    if entry in ('sqlglot', 'tests') or entry.startswith('.'): continue
+    refs = sorted(f for f, txt in tests_src.items() if re.search(r'["\'/]' + re.escape(entry) + r'["\'/]', txt))
+    if refs: root_refs[entry] = refs
+# top-level names each sqlglot module defines (to check that edited imports still resolve)
+defs, stars = {}, {}
+for p in sorted(glob.glob(os.path.join(src, 'sqlglot', '**', '*.py'), recursive=True)):
+    rel = os.path.relpath(p, src); names = set()
+    for n in ast.parse(open(p).read()).body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)): names.add(n.name)
+        elif isinstance(n, (ast.Assign, ast.AnnAssign)):
+            for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                for x in ast.walk(t):
+                    if isinstance(x, ast.Name): names.add(x.id)
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            for a in n.names: names.add((a.asname or a.name).split('.')[0])
+        elif isinstance(n, (ast.If, ast.Try)):
+            for x in ast.walk(n):
+                if isinstance(x, (ast.FunctionDef, ast.ClassDef)): names.add(x.name)
+                if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Store): names.add(x.id)
+                if isinstance(x, (ast.Import, ast.ImportFrom)):
+                    for a in x.names: names.add((a.asname or a.name).split('.')[0])
+    defs[rel] = names
+    stars[rel] = [n.module for n in ast.walk(ast.parse(open(p).read()))
+                  if isinstance(n, ast.ImportFrom) and n.module and any(a.name == '*' for a in n.names)]
+    if '__getattr__' in names: names.add('*')        # module resolves names lazily
+def modfile(m):
+    for c in (m.replace('.', '/') + '.py', m.replace('.', '/') + '/__init__.py'):
+        if c in defs: return c
+for _ in range(5):                                     # expand `from x import *`
+    for rel, mods in stars.items():
+        for m in mods:
+            f = modfile(m)
+            if f: defs[rel] |= defs[f] - {'*'}
+defs = {k: sorted(v) for k, v in defs.items()}
+data = {'root_refs': root_refs, 'defs': defs, 'usage': usage, 'import_only': import_only, 'importers': {k: sorted(v) for k, v in importers.items()}, 'ids': ids, 'sets': sets, 'lines': lines, 'file_tests': file_tests, 'uses': uses,
         'fixtures': {f: sid(s) for f, s in fix.items()}, 'fixture_dirs': {d: sid(s) for d, s in fixdir.items()}}
 with gzip.open(out, 'wt', compresslevel=9) as f: json.dump(data, f, separators=(',', ':'))
 print('sets', len(sets), 'names', len(uses), 'bytes', os.path.getsize(out))
