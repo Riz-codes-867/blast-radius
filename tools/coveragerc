@@ -1,0 +1,5 @@
+[run]
+source = sqlglot
+dynamic_context = test_function
+parallel = true
+data_file = .coverage-map/.coverage

@@ -1,70 +1,38 @@
-# Blast Radius starter
+# Blast Radius — coverage-guided test selection for sqlglot
 
-A working submission for the Blast Radius track. It runs every test on every commit, so it never misses a failure and scores badly. Your job is to run less without missing.
+Builders Buildathon 2026, RWX "Blast Radius" track. Solo entry by Syed Rizwan Ahmed.
 
-## The problem
+For each patch against sqlglot `eb11aec4be8cb2122afe713a4816662c3f0fb2fa`, `app/selector.py` prints the
+tests the patch can break, split across workers to minimise the simulated CI time.
 
-Your image gets a batch of code changes to [sqlglot](https://github.com/tobymao/sqlglot) at commit `eb11aec4be8cb2122afe713a4816662c3f0fb2fa`. For each change, print which tests to run and how to split them across up to 8 workers.
+## How it decides
 
-| | |
-| --- | --- |
-| `/data/commits/<id>.patch` | One unified diff against the pinned commit. Each stands alone: none builds on another. |
-| `/data/tests.json` | Every test, numbered, with its file and the seconds it took us to run. |
-| stdout | One JSON line a commit: `{"commit": "k7q2", "workers": [[12, 845, 901], [3, 77]]}` |
+1. **Which tests.** A per-test coverage map of the pinned commit (`app/data/map.json.gz`) says which tests
+   execute each statement. For every changed line we take the tests that run its statement (all lines of a
+   multi-line statement header, since Python 3.13 reports the inner lines). Special cases:
+   - *Comment/whitespace-only edits*: if the token stream minus comments is unchanged, the program is unchanged → no tests.
+   - *Import-time lines* (class or module constants such as `WEEK_OFFSET = -1`): coverage cannot say which test
+     depends on them, so we follow the names they define to every statement that reads them, then narrow to tests
+     that exercise the enclosing class (same-dialect files, code naming the class, the class's own methods).
+   - *Lambdas* inside class-level tables run when called, so they map like function code.
+   - *Fixture files*: tests that opened that file during the test run (recorded with an audit hook); unknown
+     fixtures fall back to tests that read its directory.
+   - *Test files*: all tests in that file and in files importing it.
+   - *Syntax errors after the patch, unknown helpers, or any internal error* → run every test (never misses).
+2. **How to split.** Longest test first onto the least-loaded worker, for 1–8 workers; keep the cheapest under
+   the official cost (busiest worker + 2 s per worker).
+3. **How much compute.** Run time does lookups only (~0.8 s for 30 commits); all heavy work happened offline.
 
-Each inner list is one worker's test numbers. `"workers": []` runs nothing, which is the right answer for a change that breaks nothing.
+## Building the map (offline, from the pinned commit only)
 
-## Scoring
+`tools/build_maps.sh <kit>` clones sqlglot at the pinned commit, runs its test suite under coverage.py with one
+coverage context per test, and records fixture-file opens. The suite sends work to spawned worker processes,
+which per-test coverage cannot see, so `tools/syncpool_plugin.py` runs that work in-process **through pickle**
+(as a real process boundary would). Nothing is derived from patches or answers; no patch→test table exists.
 
-Lower is better. [SCORING.md](SCORING.md) has the exact rules; in short:
+## Acknowledgments
 
-- A commit costs the recorded seconds of its busiest worker, plus 2 seconds for every worker.
-- A commit where you left out a test that fails adds 300 seconds.
-- The CPU seconds your program uses are added. Running sqlglot's tests while you decide is allowed, and you pay for the time.
-- Your image runs 3 times and the middle total counts.
-
-"Fails" means pytest reports a failure, an error or a timeout for the test, or the test's file cannot be imported. A test with subtests is one test: one failing subtest fails it.
-
-## Try it
-
-You need Docker, make and Python 3.9 or newer. The kit unpacks into the folder you are in, so unpack it into an empty one.
-
-```sh
-make sample   # build, run once on the 30 sample commits under the scorer's limits, and score
-make check    # the output's format only
-```
-
-`make sample` prints your simulated seconds and misses, which are exact for that output. The board adds the CPU seconds your container used and takes the middle of 3 runs, so expect it a little higher. Your program never sees `sample/answers.json`: only the patches and `tests.json` are mounted.
-
-`sample/answers.json` lists the tests each sample commit breaks and the kind of change it is. The practice and final commits are hidden, and so is everything your program prints when it runs on them. A rejected submission tells you which rule it broke and nothing more, so reproduce problems here.
-
-## Submit
-
-Push to a public GitHub repository with the `Dockerfile` at its top, then enter the repository and the commit hash on the track page. The final scores the commit you pick. If you pick none, your best practice submission counts.
-
-## Rules
-
-- Submit your own team's repository. A submission with the same repository, commit or archive as another team's is disqualified, the later one.
-- Your build may download only from public package registries: PyPI, npm, Docker Hub, GitHub releases at a fixed tag, and sqlglot’s own repository at the pinned commit. Nothing from an address your team controls. The final rebuilds every image after the cutoff, so anything else could change a submission after the deadline.
-- No answers worked out ahead of time and looked up by patch: no table from a patch, or from a kind of edit, to the tests it breaks. Maps built from the pinned commit (coverage, imports, fixtures) are allowed. Top entries are read.
-- Only the final counts. The practice board carries no prize.
-
-## How your image runs
-
-- The build has the network, 4 cores, 8 GB of memory and 10 minutes. It may clone sqlglot at the pinned commit, install it and run its tests to make coverage or import maps.
-- Your repository may hold 20 MB. Git submodules and Git LFS files are not fetched: clone sqlglot in the `Dockerfile` and commit maps as plain files.
-- The run has no network, 2 cores, 4 GB of memory and 3 minutes for the whole batch (4.5 in the final, which has about one and a half times as many commits).
-- The disk is read-only. `/tmp` holds 64 MB and is empty at the start of every run.
-- The container runs as user `nobody`, with `HOME=/tmp` and at most 256 processes.
-- stdout may hold 2 MB. More rejects the run.
-
-## Things that will catch you
-
-- Logs go to stderr. Any line on stdout that is not an answer rejects the run.
-- `score.py` names a broken rule by its code, as in `Rejected: not_json on line 1`. The table in SCORING.md says what each code means.
-- Files your program needs must be readable by `nobody`. A map written by `root` during the build with mode 600 is not.
-- pytest 9 prints a test as `PASSED` beside `SUBFAILED` lines when one of its subtests fails. That test failed.
-- sqlglot skips its executor tests unless `SKIP_INTEGRATION=0` is set. We labeled with it set, so those tests can fail.
-- `requirements.lock` is every package in the environment we labeled in, on the image the `Dockerfile` starts from. To run sqlglot's tests the way we did, `pip install -r requirements.lock` and put the sqlglot checkout on `PYTHONPATH`; sqlglot's own `pip install -e .[dev]` picks newer versions.
-- The scorer is linux/amd64. On an Apple Silicon Mac, build and run with `--platform linux/amd64`, as the Makefile does, or your timings and wheels will differ.
-- A change that only adds a comment is not promised to be harmless.
+- [sqlglot](https://github.com/tobymao/sqlglot) (MIT) — the pinned source is vendored in `app/src/` with its license.
+- [coverage.py](https://github.com/nedbat/coveragepy) and [pytest](https://pytest.org) — used offline to build the map.
+- Starter kit, scorer and scheduling idea (longest-processing-time first) from the Blast Radius starter by RWX / Builders.
+- Developed with help from Claude (Anthropic) as an AI pair-programmer; AI use is allowed by the track rules.

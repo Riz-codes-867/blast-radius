@@ -1,0 +1,158 @@
+"""Blast Radius selector: choose the tests a sqlglot patch can break, then split them across workers.
+
+Decision 1 (which tests): map each changed line of the pinned source to the tests that execute it,
+using a per-test coverage map built ahead of time from the pinned commit (see tools/ and README).
+Decision 2 (how to split): longest-test-first onto the least-loaded worker, for every worker count
+1..8, keeping the cheapest under the official cost (busiest worker + 2 s per worker).
+Decision 3 (how much compute): only lookups at run time; parsing touches just the edited files.
+Any unexpected situation falls back to running every test, which can never miss.
+"""
+import ast, gzip, json, os, sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import core
+
+DATA = Path(os.environ.get('BR_DATA', '/data'))
+SRC = HERE / 'src'
+core.SRC = str(SRC)
+
+
+def log(*a): print(*a, file=sys.stderr)
+
+
+class Selector:
+    def __init__(self, tests):
+        self.tests = tests
+        self.ms = {t['number']: round(t['seconds'] * 1000) for t in tests}
+        self.by_file = {}
+        for t in tests: self.by_file.setdefault(t['file'], set()).add(t['number'])
+        with gzip.open(HERE / 'data' / 'map.json.gz', 'rt') as f: d = json.load(f)
+        num_of_id = {t['id']: t['number'] for t in tests}
+        remap = [num_of_id.get(i) for i in d['ids']]          # build-time number -> runtime number
+        self.sets = [frozenset(remap[n] for n in s if remap[n] is not None) for s in d['sets']]
+        self.lines, self.file_sets, self.uses = d['lines'], d['file_tests'], d['uses']
+        self.fixtures, self.fixture_dirs, self.importers = d['fixtures'], d['fixture_dirs'], d['importers']
+        self.stems = {}
+        for f in self.lines: self.stems.setdefault(os.path.basename(f), []).append(f)
+        self._idx = {}
+
+    # ---- map lookups
+    def at(self, path, line):
+        s = self.lines.get(path, {}).get(str(line)); return self.sets[s] if s is not None else frozenset()
+    def file_tests(self, path):
+        s = self.file_sets.get(path); return self.sets[s] if s is not None else frozenset()
+    def users(self, name, exclude=None):
+        out = set()
+        for f, l, s in self.uses.get(name, ()):
+            if (f, l) != exclude: out |= self.sets[s]
+        return out
+    def index(self, path):
+        if path not in self._idx: self._idx[path] = core.FileIndex((SRC / path).read_text())
+        return self._idx[path]
+    def all_tests(self): return set(self.ms)
+
+    def involvement(self, path, line):
+        """Tests that exercise the class(es) around a class-level line."""
+        fi = self.index(path)
+        chain = [n for n in ast.walk(fi.tree) if isinstance(n, ast.ClassDef) and n.lineno <= line <= n.end_lineno]
+        if not chain: return None
+        inv = set()
+        if any(k in path for k in ('/dialects/', '/parsers/', '/generators/', '/typing/', '/tokenizers/')):
+            for f in self.stems.get(os.path.basename(path), ()): inv |= self.file_tests(f)
+        for c in chain:
+            inv |= self.users(c.name)
+            for l in range(c.lineno, c.end_lineno + 1):
+                if fi.in_func.get(l): inv |= self.at(path, l)
+        return inv
+
+    # ---- decision 1
+    def python_source(self, path, hunks):
+        old = (SRC / path).read_text()
+        new = core.apply_hunks(old, hunks)
+        try:
+            ast.parse(new)
+        except SyntaxError:
+            log(path, 'syntax error after patch -> all tests'); return self.all_tests()
+        if core.code_tokens(old) == core.code_tokens(new):
+            log(path, 'comments/whitespace only -> nothing'); return set()
+        fi, S = self.index(path), set()
+        for L in sorted(core.touched_old_lines(hunks)):
+            if L not in fi.span_of: continue
+            a, b = fi.span_of[L]
+            got = set()
+            for l in range(a, b + 1): got |= self.at(path, l)
+            if not fi.in_func.get(L):   # runs at import: follow the names it defines to their readers
+                names, users = fi.defined_names(L), set()
+                for nm in names: users |= self.users(nm, exclude=(path, fi.stmt_of[L]))
+                inv = self.involvement(path, L) if users else None
+                if inv is not None and users & inv: users &= inv
+                got |= users
+                if not got:
+                    got = set(self.file_tests(path)); log(path, L, 'import-time line, no readers -> whole-file tests')
+            S |= got
+        return S
+
+    def select(self, patch):
+        S = set()
+        for path, hunks in core.parse_patch(patch).items():
+            if path is None: return self.all_tests()
+            if path.startswith('sqlglot/') and path.endswith('.py'):
+                if (SRC / path).exists(): S |= self.python_source(path, hunks)
+                else: log(path, 'new module -> covered by edits that import it')
+            elif path.startswith('tests/') and path.endswith('.py'):
+                files = {path} | set(self.importers.get(path, ()))
+                for f in files: S |= self.by_file.get(f, set())
+                if not self.by_file.get(path) and path not in self.importers:
+                    S |= self.all_tests(); log(path, 'unknown test helper -> all tests')
+            elif path.startswith('tests/'):
+                got = self.fixtures.get(path)
+                if got is None:
+                    got = self.fixture_dirs.get(os.path.dirname(path))
+                    log(path, 'fixture not in map -> tests reading its directory')
+                S |= self.sets[got] if got is not None else self.all_tests()
+            elif path.startswith('sqlglot/'):
+                S |= self.file_tests(path) or self.all_tests()
+            # files outside sqlglot/ and tests/ are not read by the test suite
+        return S
+
+    # ---- decision 2
+    def cost(self, workers):
+        workers = [w for w in workers if w]
+        return 0 if not workers else max(sum(self.ms[n] for n in w) for w in workers) + 2000 * len(workers)
+    def lpt(self, nums, k):
+        W, L = [[] for _ in range(k)], [0] * k
+        for n in sorted(nums, key=lambda n: (-self.ms[n], n)):
+            i = L.index(min(L)); W[i].append(n); L[i] += self.ms[n]
+        return [w for w in W if w]
+    def schedule(self, nums):
+        if not nums: return []
+        best = None
+        for k in range(1, 9):
+            w = self.lpt(nums, k); c = self.cost(w)
+            if best is None or c < best[0]: best = (c, w)
+        return best[1]
+
+
+def main():
+    tests = json.loads((DATA / 'tests.json').read_text())['tests']
+    sel = None
+    try:
+        sel = Selector(tests)
+    except Exception as e:
+        log('map failed to load, running everything:', repr(e))
+    every = list(range(len(tests)))
+    for patch in sorted((DATA / 'commits').glob('*.patch')):
+        try:
+            chosen = sel.select(patch.read_text(errors='replace')) if sel else set(every)
+            chosen = {n for n in chosen if n in (sel.ms if sel else chosen)}
+        except Exception as e:
+            log(patch.stem, 'error, running everything:', repr(e)); chosen = set(every)
+        workers = sel.schedule(sorted(chosen)) if sel else [every]
+        print(json.dumps({'commit': patch.stem, 'workers': workers}), flush=False)
+    sys.stdout.flush()
+
+
+if __name__ == '__main__':
+    main()
