@@ -22,6 +22,13 @@ core.SRC = str(SRC)
 def log(*a): print(*a, file=sys.stderr)
 
 
+PROBE = set()
+try:
+    PROBE = set(json.loads((HERE / 'probe.json').read_text()))
+except Exception:
+    pass
+
+
 class Selector:
     def __init__(self, tests):
         self.tests = tests
@@ -127,7 +134,8 @@ class Selector:
         except SyntaxError:
             log(path, 'syntax error after patch -> all tests'); return self.all_tests()
         if core.code_tokens(old) == core.code_tokens(new):
-            log(path, 'comments/whitespace only -> nothing'); return set()
+            log(path, 'comments/whitespace only -> nothing')
+            return self.all_tests() if 'comment' in PROBE else set()
         if not self.imports_resolve(path, new_tree):
             log(path, 'an import no longer resolves -> all tests'); return self.all_tests()
         fi, S = self.index(path), set()
@@ -147,6 +155,9 @@ class Selector:
                 for fn in [n for n in ast.walk(fi.tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.lineno <= L <= n.end_lineno]:
                     got |= self.users(fn.name)
                 log(path, L, 'import-time function code ->', len(got))
+                if 'importfn' in PROBE: return self.all_tests()
+            if not fi.in_func.get(L) and 'module' in PROBE: return self.all_tests()
+            if fi.in_func.get(L) and 'func' in PROBE: return self.all_tests()
             if not fi.in_func.get(L):   # runs at import: follow the names it defines to their readers
                 names, users = fi.defined_names(L), set()
                 for nm in names: users |= self.users(nm, exclude=(path, fi.stmt_of[L]))
@@ -169,21 +180,27 @@ class Selector:
             if path is None: return self.all_tests()
             if path.startswith('sqlglot/') and path.endswith('.py'):
                 if (SRC / path).exists(): S |= self.python_source(path, hunks)
-                else: log(path, 'new module -> covered by edits that import it')
+                else:
+                    log(path, 'new module -> covered by edits that import it')
+                    if 'outside' in PROBE: return self.all_tests()
             elif path.startswith('tests/') and path.endswith('.py'):
+                if 'testfile' in PROBE: return self.all_tests()
                 files = {path} | set(self.importers.get(path, ()))
                 for f in files: S |= self.by_file.get(f, set())
                 if not self.by_file.get(path) and path not in self.importers:
                     S |= self.all_tests(); log(path, 'unknown test helper -> all tests')
             elif path.startswith('tests/'):
+                if 'fixture' in PROBE: return self.all_tests()
                 got = self.fixtures.get(path)
                 if got is None:
                     got = self.fixture_dirs.get(os.path.dirname(path))
                     log(path, 'fixture not in map -> tests reading its directory')
                 S |= self.sets[got] if got is not None else self.all_tests()
             elif path.startswith('sqlglot/'):
+                if 'outside' in PROBE: return self.all_tests()
                 S |= self.file_tests(path) or self.all_tests()
             else:   # outside sqlglot/ and tests/: only test files that name this path read it
+                if 'outside' in PROBE: return self.all_tests()
                 for f in self.root_refs.get(path.split('/')[0], ()): S |= self.by_file.get(f, set())
         return S
 
