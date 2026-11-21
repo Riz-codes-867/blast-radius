@@ -222,6 +222,68 @@ class Selector:
         return best[1]
 
 
+# ---- decision 3: when a cheap run of the selected tests can prove nothing breaks
+CHECK_FACTOR = 0.5        # run when the estimated CPU is under half of the simulated cost it could save
+EXPENSIVE = 5.0           # tests above this many CPU seconds are not run; they are dropped if the rest pass
+CHECK_WALL_BUDGET = 95.0  # seconds of wall clock for all checks in a batch (limit is 180 s, 270 s in the final)
+TESTROOT = HERE / 'testroot'
+
+
+class Checker:
+    def __init__(self, tests):
+        cal = json.loads((HERE / 'data' / 'calib.json').read_text())
+        self.cpu = {t['number']: cal['test_cpu'].get(t['id'], t['seconds']) for t in tests}
+        self.file_of = {t['number']: t['file'] for t in tests}
+        self.uid = {t['number']: t['id'].replace('.py::', '::').replace('/', '.').replace('::', '.') for t in tests}
+        self.overhead = cal['file_overhead']
+        self.ok = TESTROOT.is_dir()
+        import time; self.t0 = time.monotonic()
+
+    def estimate(self, nums):
+        files = {self.file_of[n] for n in nums}
+        return 0.6 + sum(self.overhead.get(f, 0.3) for f in files) + sum(self.cpu[n] for n in nums)
+
+    def plan(self, patch, chosen, sched_seconds):
+        """Tests worth running, or None. Fixture/test-file edits and fallbacks are never checked."""
+        if not self.ok or not chosen or sched_seconds <= 0: return None
+        for path in core.parse_patch(patch):
+            if path is None or not path.startswith('sqlglot/') or not path.endswith('.py'): return None
+        cheap = sorted((n for n in chosen if self.cpu[n] < EXPENSIVE), key=lambda n: (self.cpu[n], n))
+        if not cheap: return None
+        if self.estimate(cheap) >= CHECK_FACTOR * sched_seconds: return None
+        import time
+        if time.monotonic() - self.t0 > CHECK_WALL_BUDGET: return None
+        return cheap
+
+    def passes(self, patch, nums, cpu_budget):
+        import shutil, subprocess, tempfile
+        work = tempfile.mkdtemp(prefix='br-', dir='/tmp')
+        try:
+            shutil.copytree(SRC / 'sqlglot', os.path.join(work, 'sqlglot'))
+            for path, hunks in core.parse_patch(patch).items():
+                target = os.path.join(work, path)
+                if os.path.exists(target):
+                    with open(target) as f: old = f.read()
+                    new = core.apply_hunks(old, hunks)
+                else:
+                    new = core.apply_hunks('', hunks)
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                with open(target, 'w') as f: f.write(new)
+            env = {'PATH': os.environ.get('PATH', '/usr/local/bin:/usr/bin:/bin'), 'HOME': '/tmp',
+                   'PYTHONPATH': f'{work}:{TESTROOT}', 'PYTHONDONTWRITEBYTECODE': '1', 'SKIP_INTEGRATION': '0'}
+            import resource
+            limit = max(1, int(cpu_budget + 0.999))
+            def cap():   # the check may never cost more CPU than it could save
+                resource.setrlimit(resource.RLIMIT_CPU, (limit, limit + 1))
+            p = subprocess.run([sys.executable, '-B', str(HERE / 'runcheck.py')], input=json.dumps([self.uid[n] for n in nums]),
+                               capture_output=True, text=True, env=env, cwd=str(TESTROOT), timeout=40, preexec_fn=cap)
+            return json.loads(p.stdout.strip().splitlines()[-1]).get('passed') is True
+        except Exception as e:
+            log('check failed to run:', repr(e)); return False
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+
 def main():
     tests = json.loads((DATA / 'tests.json').read_text())['tests']
     sel = None
@@ -230,13 +292,27 @@ def main():
     except Exception as e:
         log('map failed to load, running everything:', repr(e))
     every = list(range(len(tests)))
+    checker = None
+    if sel is not None:
+        try: checker = Checker(tests)
+        except Exception as e: log('checker unavailable:', repr(e))
     for patch in sorted((DATA / 'commits').glob('*.patch')):
+        text = patch.read_text(errors='replace')
         try:
-            chosen = sel.select(patch.read_text(errors='replace')) if sel else set(every)
+            chosen = sel.select(text) if sel else set(every)
             chosen = {n for n in chosen if n in (sel.ms if sel else chosen)}
         except Exception as e:
             log(patch.stem, 'error, running everything:', repr(e)); chosen = set(every)
         workers = sel.schedule(sorted(chosen)) if sel else [every]
+        if checker is not None:
+            try:
+                sched = sel.cost(workers) / 1000
+                cheap = checker.plan(text, chosen, sched)
+                if cheap is not None and checker.passes(text, cheap, 0.8 * sched):
+                    log(patch.stem, f'ran {len(cheap)} selected tests on the patched code: all pass -> nothing to run')
+                    workers = []
+            except Exception as e:
+                log(patch.stem, 'check error, keeping selection:', repr(e))
         print(json.dumps({'commit': patch.stem, 'workers': workers}), flush=False)
     sys.stdout.flush()
 

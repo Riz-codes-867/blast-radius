@@ -31,7 +31,14 @@ tests the patch can break, split across workers to minimise the simulated CI tim
    - *Syntax errors after the patch, unknown helpers, or any internal error* → run every test (never misses).
 2. **How to split.** Longest test first onto the least-loaded worker, for 1–8 workers; keep the cheapest under
    the official cost (busiest worker + 2 s per worker).
-3. **How much compute.** Run time does lookups only (~0.8 s for 30 commits); all heavy work happened offline.
+3. **How much compute.** Selection is lookups only (~1–2 s for a batch). Then, only when it pays: if a code-only
+   patch's selected tests are cheap compared with the simulated time they would cost, we run them on a patched
+   copy of sqlglot inside the container (`app/runcheck.py`, unittest, stop at first failure). If every one passes,
+   nothing can be failing among them, so the commit runs nothing (cost 0). If any fails, we keep the full
+   selection. Tests above 5 CPU-seconds are never run; they are dropped only when all the cheaper tests that
+   cover the same change pass. Worker-pool work runs in-process (`app/syncpool.py`) so we do not pay for spawned
+   interpreters, every check has a hard CPU cap (it may never cost more than it could save), and the whole batch
+   has a wall-clock budget. CPU estimates come from per-test measurements in the same harness (`app/data/calib.json`).
 
 ## Building the map (offline, from the pinned commit only)
 
@@ -45,7 +52,8 @@ such start-up code select the file's (or dialect family's) tests plus the caller
 
 ## Acknowledgments
 
-- [sqlglot](https://github.com/tobymao/sqlglot) (MIT) — the pinned source is vendored in `app/src/` with its license.
+- [sqlglot](https://github.com/tobymao/sqlglot) (MIT) — the pinned source (`app/src/`) and its test suite (`app/testroot/tests/`) are vendored with its license.
+- duckdb, pandas, numpy — installed from PyPI at build time, pinned to the organizers' `requirements.lock`, because sqlglot's tests import them.
 - [coverage.py](https://github.com/nedbat/coveragepy) and [pytest](https://pytest.org) — used offline to build the map.
 - Starter kit, scorer and scheduling idea (longest-processing-time first) from the Blast Radius starter by RWX / Builders.
 - Developed with help from Claude (Anthropic) as an AI pair-programmer; AI use is allowed by the track rules.
