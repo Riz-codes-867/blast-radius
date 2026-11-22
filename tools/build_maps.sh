@@ -18,4 +18,6 @@ python3 "$HERE/buildmap.py" .coverage-map/.coverage "$KIT/sample/tests.json" ../
 OPENMAP_OUT=../openmap.json python3 -m pytest -q -p no:cacheprovider -p openmap_plugin tests || true
 # 3) which Dialect/Tokenizer/Parser/Generator classes (with parents) each test uses
 USAGE_OUT=../usage.json python3 -m pytest -q -p no:cacheprovider -p prewarm_plugin -p syncpool_plugin -p usage_plugin tests || true
-cd .. && python3 "$HERE/build_data.py" linemap.json openmap.json "$KIT/sample/tests.json" sqlglot "$HERE/../app/data/map.json.gz" usage.json
+# 4) which class attributes each test of a class with file-loading setUpClass actually reads
+ATTRREAD_OUT=../attrreads.json python3 -m pytest -q -p no:cacheprovider -p attrread_plugin tests || true
+cd .. && python3 "$HERE/build_data.py" linemap.json openmap.json "$KIT/sample/tests.json" sqlglot "$HERE/../app/data/map.json.gz" usage.json attrreads.json

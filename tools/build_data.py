@@ -9,6 +9,8 @@ import core
 
 linemap_json, openmap_json, tests_json, src, out = sys.argv[1:6]
 usage_json = sys.argv[6] if len(sys.argv) > 6 else None
+attrread_json = sys.argv[7] if len(sys.argv) > 7 else None
+ATTR_READS = json.load(open(attrread_json)) if attrread_json else None
 M = json.load(open(linemap_json))['lines']
 T = json.load(open(tests_json))['tests']
 ids = [t['id'] for t in T]; num_of_id = {t['id']: t['number'] for t in T}
@@ -80,6 +82,9 @@ def class_setup_readers(test_file, class_name, fixture):
         if any(h and h in fixture for h in hints):
             attrs |= {x.attr for x in ast.walk(stmt) if isinstance(x, ast.Attribute) and isinstance(x.value, ast.Name) and x.value.id == 'cls'}
     if not attrs: return None
+    if ATTR_READS is not None:   # what each test really read at run time (tools/attrread_plugin.py)
+        got = {nid for nid, names in ATTR_READS.items() if nid.startswith(f"{test_file}::{class_name}::") and set(names) & attrs}
+        if got: return got
     def reads(m, seen):
         out = {x.attr for x in ast.walk(m) if isinstance(x, ast.Attribute) and isinstance(x.value, ast.Name) and x.value.id in ('self', 'cls')}
         for name in list(out):

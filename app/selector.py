@@ -224,6 +224,7 @@ class Selector:
 
 # ---- decision 3: when a cheap run of the selected tests can prove nothing breaks
 CHECK_FACTOR = 0.5        # run when the estimated CPU is under half of the simulated cost it could save
+CHECK_MIN_SAVING = 10.0   # and only when that cost is large: small commits usually do break something
 EXPENSIVE = 5.0           # tests above this many CPU seconds are not run; they are dropped if the rest pass
 CHECK_WALL_BUDGET = 95.0  # seconds of wall clock for all checks in a batch (limit is 180 s, 270 s in the final)
 TESTROOT = HERE / 'testroot'
@@ -245,7 +246,7 @@ class Checker:
 
     def plan(self, patch, chosen, sched_seconds):
         """Tests worth running, or None. Fixture/test-file edits and fallbacks are never checked."""
-        if not self.ok or not chosen or sched_seconds <= 0: return None
+        if not self.ok or not chosen or sched_seconds < CHECK_MIN_SAVING: return None
         for path in core.parse_patch(patch):
             if path is None or not path.startswith('sqlglot/') or not path.endswith('.py'): return None
         cheap = sorted((n for n in chosen if self.cpu[n] < EXPENSIVE), key=lambda n: (self.cpu[n], n))

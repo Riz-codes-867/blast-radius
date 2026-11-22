@@ -22,8 +22,12 @@ tests the patch can break, split across workers to minimise the simulated CI tim
      `EXPRESSION_METADATA` tables), which coverage of sqlglot cannot see; edits to a definition also select the tests
      whose own code reads that name.
    - *Lambdas* inside class-level tables run when called, so they map like function code.
-   - *Fixture files*: tests that opened that file during the test run (recorded with an audit hook); unknown
-     fixtures fall back to tests that read its directory.
+   - *Fixture files*: tests that opened that file during the test run (recorded with an audit hook). Files a test
+     class loads once in `setUpClass` are credited to the class's tests that read the attribute the file was
+     loaded into (which attribute a file fills comes from the test source; which attributes each test really reads
+     is recorded at run time by `tools/attrread_plugin.py`), or to the whole class if that cannot be determined —
+     otherwise only the first test of the class would get them. Unknown fixtures fall back to tests that read
+     its directory.
    - *Test files*: all tests in that file and in files importing it.
    - *Edited imports*: if a sqlglot import in the patched file no longer resolves against the pinned source,
      every test runs (an ImportError fails whole test files); valid import edits add the import-order tests.
@@ -32,7 +36,7 @@ tests the patch can break, split across workers to minimise the simulated CI tim
 2. **How to split.** Longest test first onto the least-loaded worker, for 1–8 workers; keep the cheapest under
    the official cost (busiest worker + 2 s per worker).
 3. **How much compute.** Selection is lookups only (~1–2 s for a batch). Then, only when it pays: if a code-only
-   patch's selected tests are cheap compared with the simulated time they would cost, we run them on a patched
+   patch's selection would cost at least 10 simulated seconds and its cheap tests cost under half of that to run, we run them on a patched
    copy of sqlglot inside the container (`app/runcheck.py`, unittest, stop at first failure). If every one passes,
    nothing can be failing among them, so the commit runs nothing (cost 0). If any fails, we keep the full
    selection. Tests above 5 CPU-seconds are never run; they are dropped only when all the cheaper tests that
