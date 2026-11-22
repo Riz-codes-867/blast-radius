@@ -42,7 +42,10 @@ tests the patch can break, split across workers to minimise the simulated CI tim
    selection. Tests above 5 CPU-seconds are never run; they are dropped only when all the cheaper tests that
    cover the same change pass. Worker-pool work runs in-process (`app/syncpool.py`) so we do not pay for spawned
    interpreters, every check has a hard CPU cap (it may never cost more than it could save), and the whole batch
-   has a wall-clock budget. CPU estimates come from per-test measurements in the same harness (`app/data/calib.json`).
+   has a wall-clock budget. When every edited line is inside a function body (or a lambda in a class-level table),
+   the check skips the fresh interpreter: the selector imports the pinned sqlglot once, forks, swaps the edited
+   functions' code objects in place (`app/hotswap.py`), and runs the tests in the child — so a small check costs
+   only the tests' own time. Class/module-level edits always use a fresh interpreter on a patched copy. CPU estimates come from per-test measurements in the same harness (`app/data/calib.json`).
 
 ## Building the map (offline, from the pinned commit only)
 

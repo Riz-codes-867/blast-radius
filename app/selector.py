@@ -224,7 +224,8 @@ class Selector:
 
 # ---- decision 3: when a cheap run of the selected tests can prove nothing breaks
 CHECK_FACTOR = 0.5        # run when the estimated CPU is under half of the simulated cost it could save
-CHECK_MIN_SAVING = 10.0   # and only when that cost is large: small commits usually do break something
+CHECK_MIN_SAVING = 10.0   # slow path (fresh interpreter): only when that cost is large
+FAST_MIN_SAVING = 1.0     # fast path (fork + swapped function code): cheap enough for small commits
 EXPENSIVE = 5.0           # tests above this many CPU seconds are not run; they are dropped if the rest pass
 CHECK_WALL_BUDGET = 95.0  # seconds of wall clock for all checks in a batch (limit is 180 s, 270 s in the final)
 TESTROOT = HERE / 'testroot'
@@ -244,17 +245,38 @@ class Checker:
         files = {self.file_of[n] for n in nums}
         return 0.6 + sum(self.overhead.get(f, 0.3) for f in files) + sum(self.cpu[n] for n in nums)
 
+    def swap_plans(self, patch):
+        """Per-file hot-swap plans when every edit is inside function bodies, else None."""
+        import hotswap
+        plans = {}
+        for path, hunks in core.parse_patch(patch).items():
+            src = SRC / path
+            if path is None or not src.exists(): return None
+            old = src.read_text(); new = core.apply_hunks(old, hunks)
+            if core.code_tokens(old) == core.code_tokens(new): continue
+            fi = core.FileIndex(old)
+            plan = hotswap.swap_plan(path, old, new, sorted(core.touched_old_lines(hunks)), fi)
+            if plan is None: return None
+            plans[path] = plan
+        return plans or None
+
     def plan(self, patch, chosen, sched_seconds):
-        """Tests worth running, or None. Fixture/test-file edits and fallbacks are never checked."""
-        if not self.ok or not chosen or sched_seconds < CHECK_MIN_SAVING: return None
+        """(tests worth running, fast-path plans or None), or None. Fixture/test-file edits and fallbacks are never checked."""
+        if not self.ok or not chosen or sched_seconds < FAST_MIN_SAVING: return None
         for path in core.parse_patch(patch):
             if path is None or not path.startswith('sqlglot/') or not path.endswith('.py'): return None
         cheap = sorted((n for n in chosen if self.cpu[n] < EXPENSIVE), key=lambda n: (self.cpu[n], n))
         if not cheap: return None
-        if self.estimate(cheap) >= CHECK_FACTOR * sched_seconds: return None
         import time
         if time.monotonic() - self.t0 > CHECK_WALL_BUDGET: return None
-        return cheap
+        plans = None
+        try: plans = self.swap_plans(patch)
+        except Exception as e: log('no fast path:', repr(e))
+        if plans is not None:
+            est = self.estimate(cheap) - 0.55          # no interpreter start-up, no sqlglot import
+            if est < CHECK_FACTOR * sched_seconds: return cheap, plans
+        if sched_seconds < CHECK_MIN_SAVING or self.estimate(cheap) >= CHECK_FACTOR * sched_seconds: return None
+        return cheap, None
 
     def passes(self, patch, nums, cpu_budget):
         import shutil, subprocess, tempfile
@@ -308,8 +330,17 @@ def main():
         if checker is not None:
             try:
                 sched = sel.cost(workers) / 1000
-                cheap = checker.plan(text, chosen, sched)
-                if cheap is not None and checker.passes(text, cheap, 0.8 * sched):
+                planned = checker.plan(text, chosen, sched)
+                passed = False
+                if planned is not None:
+                    cheap, plans = planned
+                    if plans is not None:
+                        import hotswap
+                        hotswap.preload(SRC, TESTROOT)
+                        passed = hotswap.run_in_fork(plans, [checker.uid[n] for n in cheap], max(1, int(0.8 * sched + 0.999)))
+                    else:
+                        passed = checker.passes(text, cheap, 0.8 * sched)
+                if planned is not None and passed:
                     log(patch.stem, f'ran {len(cheap)} selected tests on the patched code: all pass -> nothing to run')
                     workers = []
             except Exception as e:
