@@ -47,12 +47,56 @@ for p in sorted(glob.glob(os.path.join(src, 'sqlglot', '**', '*.py'), recursive=
 uses = {nm: sorted(v) for nm, v in uses.items()}
 
 # fixture file -> tests that opened it; fixture directory -> tests that opened anything in it
-OM = json.load(open(openmap_json))
+OMRAW = json.load(open(openmap_json))
+OM = OMRAW['tests'] if 'tests' in OMRAW else OMRAW
 fix, fixdir = collections.defaultdict(set), collections.defaultdict(set)
 for nid, fs in OM.items():
     if nid in num_of_id:
         for f in fs:
             fix[f].add(num_of_id[nid]); fixdir[os.path.dirname(f)].add(num_of_id[nid])
+
+def class_setup_readers(test_file, class_name, fixture):
+    """Tests of a class that read the attribute(s) setUpClass filled from `fixture` (static, from test source).
+    None when that cannot be determined, meaning: credit the whole class."""
+    tree = ast.parse(open(os.path.join(src, test_file)).read())
+    consts = {}
+    for n in tree.body:
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                if isinstance(t, ast.Name):
+                    consts[t.id] = [c.value for c in ast.walk(n.value) if isinstance(c, ast.Constant) and isinstance(c.value, str)]
+    cls = next((c for c in tree.body if isinstance(c, ast.ClassDef) and c.name == class_name), None)
+    if cls is None: return None
+    methods = {m.name: m for m in cls.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    setup = methods.get('setUpClass')
+    if setup is None: return None
+    attrs = set()
+    for stmt in setup.body:
+        hints = []
+        for x in ast.walk(stmt):
+            if isinstance(x, ast.Constant) and isinstance(x.value, str): hints.append(x.value)
+            if isinstance(x, ast.Name) and x.id in consts: hints += consts[x.id]
+        hints = [h.strip('/') for h in hints if '/' in h or h.endswith(('.sql', '.gz', '.csv', '.json'))]
+        if any(h and h in fixture for h in hints):
+            attrs |= {x.attr for x in ast.walk(stmt) if isinstance(x, ast.Attribute) and isinstance(x.value, ast.Name) and x.value.id == 'cls'}
+    if not attrs: return None
+    def reads(m, seen):
+        out = {x.attr for x in ast.walk(m) if isinstance(x, ast.Attribute) and isinstance(x.value, ast.Name) and x.value.id in ('self', 'cls')}
+        for name in list(out):
+            if name in methods and name not in seen:
+                seen.add(name); out |= reads(methods[name], seen)
+        return out
+    return {f"{test_file}::{class_name}::{name}" for name, m in methods.items()
+            if name.startswith('test') and reads(m, {name}) & attrs}
+
+for cls_id, files in OMRAW.get('class_setup', {}).items():
+    test_file, class_name = cls_id.split('::')
+    members = [nid for nid in OMRAW.get('all', []) if nid.startswith(cls_id + '::')]
+    for f in files:
+        chosen = class_setup_readers(test_file, class_name, f)
+        for nid in (chosen if chosen is not None else members):
+            if nid in num_of_id:
+                fix[f].add(num_of_id[nid]); fixdir[os.path.dirname(f)].add(num_of_id[nid])
 
 # test module -> test files that import it (e.g. tests/dialects/test_dialect.py's Validator)
 importers = collections.defaultdict(set)
